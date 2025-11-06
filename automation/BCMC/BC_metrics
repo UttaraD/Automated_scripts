@@ -1,0 +1,133 @@
+-- Workspace setup
+USE DATABASE DEMO_DB;
+USE SCHEMA PUBLIC;
+
+-- =======================================================
+-- 1) PERMANENT SOURCE TABLES
+-- =======================================================
+CREATE OR REPLACE TABLE CUSTOMERS (
+  CUSTOMER_ID INT,
+  CUSTOMER_NAME STRING,
+  STATE STRING
+);
+INSERT OVERWRITE INTO CUSTOMERS VALUES
+  (1,'Alice','CA'),
+  (2,'Bob','NY'),
+  (3,'Chloe','TX'),
+  (4,'David','CA');
+
+CREATE OR REPLACE TABLE PRODUCTS (
+  PRODUCT_ID INT,
+  PRODUCT_NAME STRING,
+  CATEGORY STRING,
+  PRICE NUMBER(10,2)
+);
+INSERT OVERWRITE INTO PRODUCTS VALUES
+  (10,'Keyboard','Accessories',29.99),
+  (11,'Mouse','Accessories',19.99),
+  (12,'Monitor','Hardware',199.00),
+  (13,'Laptop','Hardware',799.00);
+
+CREATE OR REPLACE TABLE ORDERS (
+  ORDER_ID INT,
+  CUSTOMER_ID INT,
+  ORDER_DATE DATE
+);
+INSERT OVERWRITE INTO ORDERS VALUES
+  (1001,1,'2025-10-20'),
+  (1002,1,'2025-11-01'),
+  (1003,2,'2025-10-28'),
+  (1004,3,'2025-11-03'),
+  (1005,4,'2025-11-05');
+
+CREATE OR REPLACE TABLE ORDER_ITEMS (
+  ORDER_ID INT,
+  PRODUCT_ID INT,
+  QTY INT
+);
+INSERT OVERWRITE INTO ORDER_ITEMS VALUES
+  (1001,10,1),
+  (1001,11,2),
+  (1002,12,1),
+  (1003,10,1),
+  (1003,11,1),
+  (1004,12,2),
+  (1005,13,1);
+
+-- =======================================================
+-- 2) PERMANENT INTERMEDIATE TABLES
+-- =======================================================
+
+-- A) Combine order + item + product to compute detailed sales
+CREATE OR REPLACE TABLE SALES_DETAIL AS
+SELECT
+  oi.ORDER_ID,
+  o.CUSTOMER_ID,
+  o.ORDER_DATE,
+  p.PRODUCT_ID,
+  p.PRODUCT_NAME,
+  p.CATEGORY,
+  oi.QTY,
+  p.PRICE,
+  (oi.QTY * p.PRICE) AS LINE_TOTAL
+FROM ORDER_ITEMS oi
+JOIN ORDERS o
+  ON oi.ORDER_ID = o.ORDER_ID
+JOIN PRODUCTS p
+  ON oi.PRODUCT_ID = p.PRODUCT_ID;
+
+-- B) Aggregate sales per customer (stored permanently)
+CREATE OR REPLACE TABLE CUSTOMER_SALES_SUMMARY AS
+SELECT
+  c.CUSTOMER_ID,
+  c.CUSTOMER_NAME,
+  c.STATE,
+  SUM(sd.LINE_TOTAL) AS TOTAL_SPENT,
+  COUNT(DISTINCT sd.ORDER_ID) AS NUM_ORDERS
+FROM CUSTOMERS c
+LEFT JOIN SALES_DETAIL sd
+  ON c.CUSTOMER_ID = sd.CUSTOMER_ID
+GROUP BY c.CUSTOMER_ID, c.CUSTOMER_NAME, c.STATE;
+
+-- =======================================================
+-- 3) TEMPORARY TABLES (session-scoped logic)
+-- =======================================================
+
+-- A) Recent orders (last 30 days)
+CREATE OR REPLACE TEMP TABLE TMP_RECENT_ORDERS AS
+SELECT ORDER_ID, CUSTOMER_ID, ORDER_DATE
+FROM ORDERS
+WHERE ORDER_DATE >= CURRENT_DATE() - 30;
+
+-- B) Latest recent order per customer (window + QUALIFY)
+CREATE OR REPLACE TEMP TABLE TMP_LATEST_ORDER_PER_CUSTOMER AS
+SELECT
+  CUSTOMER_ID,
+  ORDER_ID,
+  ORDER_DATE,
+  ROW_NUMBER() OVER (PARTITION BY CUSTOMER_ID ORDER BY ORDER_DATE DESC) AS RN
+FROM TMP_RECENT_ORDERS
+QUALIFY RN = 1;
+
+-- =======================================================
+-- 4) FINAL OUTPUT (combines permanent + temp)
+-- =======================================================
+CREATE OR REPLACE TABLE FINAL_CUSTOMER_REPORT AS
+SELECT
+  cs.CUSTOMER_ID,
+  cs.CUSTOMER_NAME,
+  cs.STATE,
+  cs.TOTAL_SPENT,
+  cs.NUM_ORDERS,
+  lo.ORDER_ID AS LATEST_ORDER_ID,
+  lo.ORDER_DATE AS LATEST_ORDER_DATE
+FROM CUSTOMER_SALES_SUMMARY cs
+LEFT JOIN TMP_LATEST_ORDER_PER_CUSTOMER lo
+  ON cs.CUSTOMER_ID = lo.CUSTOMER_ID;
+
+-- =======================================================
+-- 5) Preview results
+-- =======================================================
+SELECT *
+FROM FINAL_CUSTOMER_REPORT
+ORDER BY CUSTOMER_ID;
